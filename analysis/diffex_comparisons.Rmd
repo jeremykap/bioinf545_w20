@@ -10,6 +10,7 @@ library(DESeq2)
 library(sleuth)
 library(tximport)
 library(jsonlite)
+library(data.table)
 library(vsn)
 library(tidyverse)
 set.seed(42)
@@ -220,6 +221,34 @@ deseq_fc_lrt %>%
 
 # Merged Analyses
 
+## counts_to_rpm, pca
+```{r}
+tfc <- t(fc_mat)
+# Convert Kallisto counts to rpm
+kalread<-cbind(kallisto_mapped_reads=samples_filt$kallisto_mapped_reads, sleuth_rna_norm %>% rownames_to_column("sample"))
+kalrpm<-setDT(kalread) [, lapply(.SD, function(x) (x * 1e6) / (kallisto_mapped_reads)),  by=.(kallisto_mapped_reads,sample)] %>% 
+  column_to_rownames("sample")
+
+# Convert star fc to rpm
+#get df with est total reads for star
+staread<-cbind(star_est_mapped=colSums(fc_mat), as.data.frame(tfc) %>% rownames_to_column("sample"))
+starpm<-setDT(staread) [, lapply(.SD, function(x) (x * 1e6) / (star_est_mapped)),  by=.(star_est_mapped,sample)] %>%
+  column_to_rownames("sample")
+
+## scale pca with rpm
+kal_rpm_pca <- prcomp(kalrpm[,-1],center=TRUE,scale.=TRUE)
+
+starnorm_std <- scale(starpm[,-1])
+#star counts include some zero, set scale/std apply to those !=0
+star_rpm_pca <- prcomp(starnorm_std[ , which(apply(starnorm_std, 2, var) != 0)],center=TRUE)
+
+## superimposed pca plots from the two sources
+p1<-kal_rpm_pca$x[,1:2] %>% as.data.frame()
+p2<-star_rpm_pca$x[,1:2] %>% as.data.frame()
+ggplot()+geom_point(data=p1,aes(x=PC1,y=PC2, color='Kallisto')) + geom_point(data=p2,aes(x=PC1,y=PC2,color='STAR')) + scale_colour_manual(name="Dataset",values=c(Kallisto="blue", STAR="red"))
+```
+
+
 ## Comparison of log2FC
 ```{r}
 log2fc_combined <- sleuth_diffex_wald %>%
@@ -250,6 +279,5 @@ deseq_kallisto_lrt %>% write_tsv("deseq_kallisto_lrt.tsv")
 
 deseq_fc_lrt %>% write_tsv("deseq_fc_lrt.tsv")
 ```
-
 
 
