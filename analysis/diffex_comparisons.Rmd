@@ -12,6 +12,16 @@ library(tximport)
 library(jsonlite)
 library(data.table)
 library(vsn)
+library(EnhancedVolcano)
+library(viridis)
+library(ggpubr)
+library(MASS)
+library(rtracklayer)
+library(VennDiagram)
+library(RColorBrewer)
+library(ComplexHeatmap)
+library(RColorBrewer)
+library(circlize)
 library(tidyverse)
 set.seed(42)
 ```
@@ -77,8 +87,6 @@ samples_filt <-samples %>%
 
 
 # Sleuth
-
-
 ```{r include=FALSE}
 # Setup sleuth object
 s_obj <- sleuth_prep(
@@ -101,6 +109,7 @@ plot_pca(s_obj,units="scaled_reads_per_base",color_by = "Response",use_filtered 
 
 ### Standardized PCA
 ```{r}
+
 sleuth_rna_norm <- s_obj$obs_norm_filt %>% 
   select(sample,target_id,scaled_reads_per_base) %>%
   spread(key=target_id,value=scaled_reads_per_base) %>%
@@ -138,7 +147,7 @@ sleuth_diffex_wald %>% arrange(qval)
 ```{r}
 plot_volcano(s_obj,test_type="wt",test="ResponseR",sig_level=0.05) +
   labs(title="Volcano Plot of Sleuth Identified Differentially Expressed Genes",
-       x="log2FC",
+       x="log2FC", y = "qval",
         color="Q < 0.05")
 ```
 
@@ -163,13 +172,13 @@ txi <- tximport(
 )
 rownames(samples_filt) <- samples_filt$`Patient ID`
 deseq_kallisto_data <- DESeqDataSetFromTximport(txi,samples_filt,~Response)
-
 ```
 
 ## QC
 ```{r}
 deseq_kallisto_norm <- vst(deseq_kallisto_data)
 meanSdPlot(assay(deseq_kallisto_norm),ranks=FALSE,bins=100)
+
 ```
 
 
@@ -186,6 +195,7 @@ deseq_kallisto_lrt %>%
   arrange(padj) %>%
   select(row,log2FoldChange,pvalue,padj) %>%
   left_join(select(t2g,ensembl_gene_id,external_gene_name),by=c("row"="ensembl_gene_id"))
+deseq_kallisto_lrt
 ```
 
 # DESeq (FeatureCounts)
@@ -249,35 +259,316 @@ ggplot()+geom_point(data=p1,aes(x=PC1,y=PC2, color='Kallisto')) + geom_point(dat
 ```
 
 
+
 ## Comparison of log2FC
 ```{r}
+equation = function(x) {
+  lm_coef <- list(a = round(as.numeric(coef(x)[1]), digits = 2),
+                  b = round(as.numeric(coef(x)[2]), digits = 2),
+                  r2 = round(summary(x)$r.squared, digits = 2));
+  lm_eq <- substitute(italic(y) == a + b %.% italic(x)*","~~italic(R)^2~"="~r2,lm_coef)
+  as.character(as.expression(lm_eq));                 
+}
+
 log2fc_combined <- sleuth_diffex_wald %>%
   filter(!is.na(b)) %>%
   select(gene=target_id,sleuth_log2FC=b,sleuth_q=qval) %>%
   left_join(select(deseq_kallisto_lrt,row,deseq_kal_log2FC=log2FoldChange,deseq_kal_q=padj),by=c("gene"="row")) %>%
   left_join(select(deseq_fc_lrt,row,deseq_fc_log2FC=log2FoldChange,deseq_fc_q=padj),by=c("gene"="row")) %>%
   filter(!is.na(deseq_fc_log2FC))
-  
+
+regression.line <- lm(deseq_kal_log2FC ~ sleuth_log2FC, data = log2fc_combined)
 log2fc_combined %>%
   ggplot(aes(x=sleuth_log2FC,y=deseq_kal_log2FC)) +
-    geom_point() +
-    labs(title="Comparison of log2FC between Sleuth and DESeq Kallisto",
-         subtitle=paste("R^2:",round(cor(log2fc_combined$sleuth_log2FC,log2fc_combined$deseq_kal_log2FC)^2,3)))
+  geom_point(aes(x=sleuth_log2FC,y=deseq_kal_log2FC)) +
+  geom_hline(yintercept=0, color="darkgray") + 
+  geom_vline(xintercept=0, color="darkgray") +
+  theme_pubr(base_size = 14)+
+  geom_smooth(method = "lm", color="red") +
+  annotate("text", label = equation(regression.line), x = -3, y = 4, parse = TRUE)+
+  labs(title="Comparison of log2FC between Sleuth and DESeq Kallisto")
+
+
+regression.line <- lm(deseq_fc_log2FC ~ deseq_kal_log2FC, data = log2fc_combined)
 log2fc_combined %>%
   ggplot(aes(x=deseq_kal_log2FC,y=deseq_fc_log2FC)) +
-    geom_point() +
-    labs(title="Comparison of log2FC between DESeq From Kallisto and FC",
-         subtitle=paste("R^2:",round(cor(log2fc_combined$deseq_kal_log2FC,log2fc_combined$deseq_fc_log2FC)^2,3)))
+  geom_point() +
+  geom_hline(yintercept=0, color="darkgray") + 
+  geom_vline(xintercept=0, color="darkgray") +
+  theme_pubr(base_size = 14)+
+  geom_smooth(method = "lm", color="red") +
+  annotate("text", label = equation(regression.line), x = -4, y = 5, parse = TRUE)+
+  labs(title="Comparison of log2FC between DESeq From Kallisto and FC")
+
 ```
+
+
+
+## combine all logFC data
+```{r}
+sleuth_diffex_wald <- sleuth_diffex_wald %>% filter(!is.na(b)) 
+deseq_fc_lrt <- deseq_fc_lrt %>% filter(!is.na(log2FoldChange)) 
+deseq_kallisto_lrt <- deseq_kallisto_lrt %>% filter(!is.na(log2FoldChange)) 
+
+log2fc_full_combined <- sleuth_diffex_wald %>%
+  select(gene=target_id,sleuth_log2FC=b,sleuth_q=qval) %>%
+  full_join(select(deseq_kallisto_lrt,row,deseq_kal_log2FC=log2FoldChange,deseq_kal_q=padj),by=c("gene"="row")) %>%
+  full_join(select(deseq_fc_lrt,row,deseq_fc_log2FC=log2FoldChange,deseq_fc_q=padj),by=c("gene"="row"))
+log2fc_full_combined
+
+```
+
+## Volcano Plots
+
+### Slueth
+```{r}
+
+log2fc_full_combined$log2FoldChange <- log2fc_full_combined$sleuth_log2FC
+log2fc_full_combined$padj <- log2fc_full_combined$sleuth_q
+log2fc_final <- log2fc_full_combined %>% filter(!is.na(log2FoldChange)) 
+
+thres <- 1
+keyvals.color <- rep('green', nrow(log2fc_final))
+# set the base name/label as 'Mid'
+names(keyvals.color) <- rep('Mid', nrow(log2fc_final))
+
+keyvals.color[which(log2fc_final$log2FoldChange > thres)] <- 'red'
+names(keyvals.color)[which(log2fc_final$log2FoldChange > thres)] <- 'UpRegulated'
+
+keyvals.color[which(log2fc_final$log2FoldChange < -thres)] <- 'royalblue'
+names(keyvals.color)[which(log2fc_final$log2FoldChange < -thres)] <- 'DownRegulated'
+
+down.genes  <- which((log2fc_final$padj < 0.3) & (log2fc_final$log2FoldChange <= -3))
+up.genes  <- which((log2fc_final$padj < 0.3) & (log2fc_final$log2FoldChange >= 3))
+up.down.genes = c(down.genes, up.genes)
+length(up.down.genes)
+
+table(keyvals.color)
+EnhancedVolcano(log2fc_final,
+                lab = (log2fc_final$gene),
+                x = 'log2FoldChange',
+                y = 'padj', 
+                title = 'R vs. NR  - sleuth',
+                drawConnectors = TRUE,
+                widthConnectors = 0.3,
+                colConnectors = 'grey30',
+                colCustom = keyvals.color,
+                pCutoff = NA,
+                cutoffLineType = 'blank',
+                vline = c(-thres,thres),
+                vlineCol = c('grey50', 'grey50'),
+                gridlines.major = FALSE,
+                gridlines.minor = FALSE,
+                ylim = c(0,1.5),
+                selectLab = log2fc_final$gene[up.down.genes]
+                )
+
+```
+
+### deseq_kal
+```{r}
+
+log2fc_full_combined$log2FoldChange <- log2fc_full_combined$deseq_kal_log2FC
+log2fc_full_combined$padj <- log2fc_full_combined$deseq_kal_q
+log2fc_final <- log2fc_full_combined %>% filter(!is.na(log2FoldChange)) 
+
+thres <- 1
+keyvals.color <- rep('green', nrow(log2fc_final))
+# set the base name/label as 'Mid'
+names(keyvals.color) <- rep('Mid', nrow(log2fc_final))
+
+keyvals.color[which(log2fc_final$log2FoldChange > thres)] <- 'red'
+names(keyvals.color)[which(log2fc_final$log2FoldChange > thres)] <- 'UpRegulated'
+
+keyvals.color[which(log2fc_final$log2FoldChange < -thres)] <- 'royalblue'
+names(keyvals.color)[which(log2fc_final$log2FoldChange < -thres)] <- 'DownRegulated'
+
+down.genes  <- which((log2fc_final$padj < 0.3) & (log2fc_final$log2FoldChange <= -20))
+up.genes  <- which((log2fc_final$padj < 0.3) & (log2fc_final$log2FoldChange >= 5))
+up.down.genes = c(down.genes, up.genes)
+length(up.down.genes)
+
+table(keyvals.color)
+EnhancedVolcano(log2fc_final,
+                lab = (log2fc_final$gene),
+                x = 'log2FoldChange',
+                y = 'padj', 
+                title = 'R vs. NR  - Deseq-kallisto',
+                drawConnectors = TRUE,
+                widthConnectors = 0.3,
+                colConnectors = 'grey30',
+                colCustom = keyvals.color,
+                pCutoff = NA,
+                cutoffLineType = 'blank',
+                vline = c(-thres,thres),
+                vlineCol = c('grey50', 'grey50'),
+                gridlines.major = FALSE,
+                gridlines.minor = FALSE,
+                ylim = c(0,10),
+                selectLab = log2fc_final$gene[up.down.genes]
+                )
+
+```
+
+
+### deseq_fc
+```{r}
+log2fc_full_combined$log2FoldChange <- log2fc_full_combined$deseq_fc_log2FC
+log2fc_full_combined$padj <- log2fc_full_combined$deseq_fc_q
+log2fc_final <- log2fc_full_combined %>% filter(!is.na(log2FoldChange)) 
+
+thres <- 1
+keyvals.color <- rep('green', nrow(log2fc_final))
+# set the base name/label as 'Mid'
+names(keyvals.color) <- rep('Mid', nrow(log2fc_final))
+
+keyvals.color[which(log2fc_final$log2FoldChange > thres)] <- 'red'
+names(keyvals.color)[which(log2fc_final$log2FoldChange > thres)] <- 'UpRegulated'
+
+keyvals.color[which(log2fc_final$log2FoldChange < -thres)] <- 'royalblue'
+names(keyvals.color)[which(log2fc_final$log2FoldChange < -thres)] <- 'DownRegulated'
+
+down.genes  <- which((log2fc_final$padj < 0.3) & (log2fc_final$log2FoldChange <= -8))
+up.genes  <- which((log2fc_final$padj < 0.3) & (log2fc_final$log2FoldChange >= 4))
+up.down.genes = c(down.genes, up.genes)
+length(up.down.genes)
+
+table(keyvals.color)
+EnhancedVolcano(log2fc_final,
+                lab = (log2fc_final$gene),
+                x = 'log2FoldChange',
+                y = 'padj', 
+                title = 'R vs. NR  - Deseq-fc',
+                drawConnectors = TRUE,
+                widthConnectors = 0.3,
+                colConnectors = 'grey30',
+                colCustom = keyvals.color,
+                pCutoff = NA,
+                cutoffLineType = 'blank',
+                vline = c(-thres,thres),
+                vlineCol = c('grey50', 'grey50'),
+                gridlines.major = FALSE,
+                gridlines.minor = FALSE,
+                ylim = c(0,15),
+                selectLab = log2fc_final$gene[up.down.genes]
+                )
+
+```
+
+
+## Venn diagram
+```{r}
+thres <- 1
+# get the name of the upregulated/downregulated genes from 3 different methods
+sleuth.up <- sleuth_diffex_wald$target_id[which((sleuth_diffex_wald$qval <= 0.05) & (sleuth_diffex_wald$b >= thres))]
+sleuth.down <- sleuth_diffex_wald$target_id[which((sleuth_diffex_wald$qval <= 0.05) & (sleuth_diffex_wald$b <= -thres))]
+deseq.k.up <- deseq_kallisto_lrt$row[which((deseq_kallisto_lrt$padj <= 0.05) & (deseq_kallisto_lrt$log2FoldChange >= thres))]
+deseq.k.down <- deseq_kallisto_lrt$row[which((deseq_kallisto_lrt$padj <= 0.05) & (deseq_kallisto_lrt$log2FoldChange <= -thres))]
+deseq.fc.up <- deseq_fc_lrt$row[which((deseq_fc_lrt$padj <= 0.05) & (deseq_fc_lrt$log2FoldChange >= thres))]
+deseq.fc.down <- deseq_fc_lrt$row[which((deseq_fc_lrt$padj <= 0.05) & (deseq_fc_lrt$log2FoldChange <= -thres))]
+
+# up-regulated venn-diagram
+grid.newpage()
+vd <- venn.diagram(x = list("sleuth.up" = (sleuth.up),
+                            "deseq-Kallisto.up" = (deseq.k.up),
+                            "deseq-FC.up" = (deseq.fc.up)),
+                   fill = brewer.pal(4, "Set2")[1:3], filename = NULL)
+grid.draw(vd)
+
+# down-regulated venn-diagram
+grid.newpage()
+vd <- venn.diagram(x = list("sleuth.down" = (sleuth.down),
+                            "deseq-Kallisto.down" = (deseq.k.down),
+                            "deseq-FC.down" = (deseq.fc.down)),
+                   fill = brewer.pal(4, "Set2")[1:3], filename = NULL)
+grid.draw(vd)
+
+```
+
+
+## Heatmap
+```{r}
+
+#sleuth.up <- sleuth_diffex_wald$target_id[which((sleuth_diffex_wald$qval <= 0.05) & (sleuth_diffex_wald$b >= thres))]
+#sleuth.down <- sleuth_diffex_wald$target_id[which((sleuth_diffex_wald$qval <= 0.05) & (sleuth_diffex_wald$b <= -thres))]
+
+normalized_counts <- counts(deseq_kallisto_data, normalized=TRUE)
+colnames(normalized_counts)
+
+
+updown.gene <- deseq_kallisto_lrt[which((deseq_kallisto_lrt$log2FoldChange > 1 | deseq_kallisto_lrt$log2FoldChange < -1) & deseq_kallisto_lrt$padj < 0.05),]
+updown.gene$updown <- ifelse((updown.gene$log2FoldChange> 1), "up", "down")
+
+updown.regul <- as.matrix(updown.gene[,"updown", drop=FALSE])
+
+heatmapdata <- normalized_counts[match(updown.gene$row, row.names(normalized_counts)),]
+
+zscore_data <- t(apply(heatmapdata, 1, scale))
+colnames(zscore_data) = colnames(heatmapdata)
+
+col_updown = c("up" = "pink", "down" = "purple")
+
+row.names(samples_filt) <- samples_filt$`Patient ID`
+samples_filt
+
+ha = HeatmapAnnotation(type = samples_filt$Response, annotation_name_side = "left",  
+                       col = list(type = c("NR" = "yellow", "R" = "black")))
+dim(normalized_counts)
+
+ht1 = Heatmap(zscore_data, name = "expression",
+        col = colorRamp2(c(-2, 0, 2), c("blue", "white", "red")),
+        show_column_names = FALSE, show_row_names=FALSE,
+        row_title = NULL,
+        bottom_annotation = ha,
+        heatmap_width = 400, heatmap_height = 100)
+
+ht2 = Heatmap(updown.regul, name = "up vs down", col = col_updown, show_row_names=FALSE)
+ht_list = ht1 + ht2
+draw(ht_list, row_km = 1, row_split = updown.regul, cluster_rows = TRUE)
+```
+
+```{r}
+
+#sleuth.up <- sleuth_diffex_wald$target_id[which((sleuth_diffex_wald$qval <= 0.05) & (sleuth_diffex_wald$b >= thres))]
+#sleuth.down <- sleuth_diffex_wald$target_id[which((sleuth_diffex_wald$qval <= 0.05) & (sleuth_diffex_wald$b <= -thres))]
+normalized_counts <- counts(deseq_fc, normalized=TRUE)
+
+updown.gene <- deseq_fc_lrt[which((deseq_fc_lrt$log2FoldChange > 1 | deseq_fc_lrt$log2FoldChange < -1) & deseq_fc_lrt$padj < 0.05),]
+updown.gene$updown <- ifelse((updown.gene$log2FoldChange> 1), "up", "down")
+
+updown.regul <- as.matrix(updown.gene[,"updown", drop=FALSE])
+
+heatmapdata <- normalized_counts[match(updown.gene$row, row.names(normalized_counts)),]
+
+zscore_data <- t(apply(heatmapdata, 1, scale))
+colnames(zscore_data) = colnames(heatmapdata)
+
+col_updown = c("up" = "pink", "down" = "purple")
+
+row.names(samples_filt) <- samples_filt$`Patient ID`
+samples_filt
+
+ha = HeatmapAnnotation(type = samples_filt$Response, annotation_name_side = "left",  
+                       col = list(type = c("NR" = "yellow", "R" = "black")))
+dim(normalized_counts)
+
+ht1 = Heatmap(zscore_data, name = "expression",
+        col = colorRamp2(c(-2, 0, 2), c("blue", "white", "red")),
+        show_column_names = FALSE, show_row_names=FALSE,
+        row_title = NULL,
+        bottom_annotation = ha,
+        heatmap_width = 400, heatmap_height = 100)
+
+ht2 = Heatmap(updown.regul, name = "up vs down", col = col_updown, show_row_names=FALSE)
+ht_list = ht1 + ht2
+draw(ht_list, row_km = 1, row_split = updown.regul, cluster_rows = TRUE)
+```
+
 
 # Write out relevant files
 ```{r}
 sleuth_diffex_lrt %>% write_tsv("sleuth_diffex_lrt.tsv")
 sleuth_diffex_wald %>% write_tsv("sleuth_diffex_wald.tsv")
-
 deseq_kallisto_lrt %>% write_tsv("deseq_kallisto_lrt.tsv")
-
 deseq_fc_lrt %>% write_tsv("deseq_fc_lrt.tsv")
 ```
-
-
