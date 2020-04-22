@@ -24,6 +24,7 @@ library(RColorBrewer)
 library(circlize)
 library(tidyverse)
 set.seed(42)
+RESPONSE_COLORS = c("NR"="purple","R"="orange")
 ```
 
 ## Setup sample details
@@ -115,13 +116,17 @@ sleuth_rna_norm <- s_obj$obs_norm_filt %>%
   spread(key=target_id,value=scaled_reads_per_base) %>%
   column_to_rownames("sample")
 sleuth_std_pca <- prcomp((sleuth_rna_norm),center=T,scale.=T)
+sleuth_variance_explained = summary(sleuth_std_pca)$importance[2,1:2]
 sleuth_std_pca$x[,1:2] %>%
   as.data.frame() %>%
   rownames_to_column("SRR") %>%
   left_join(samples,by="SRR") %>%
   ggplot(aes(x=PC1,y=PC2,color=Response,label=SRR)) +
-    geom_point()  + 
-   geom_label(size=2)
+    geom_point(size=3) +
+    labs(title="PCA Plot of Sleuth Normalized Kallisto Quantified Data",
+         x = paste0("PC1: ", round(sleuth_variance_explained[1]*100),"% Variance"),
+         y = paste0("PC2: ", round(sleuth_variance_explained[2]*100),"% Variance")) +
+    scale_color_manual(values=RESPONSE_COLORS)
 ```
 
 ## Diffex
@@ -184,7 +189,10 @@ meanSdPlot(assay(deseq_kallisto_norm),ranks=FALSE,bins=100)
 
 ## PCA
 ```{r}
-plotPCA(deseq_kallisto_norm,intgroup="Response",ntop=500000)
+plotPCA(deseq_kallisto_norm,intgroup="Response",ntop=500000)   +
+  labs(title="PCA Plot of DESeq Normalized Kallisto Quantified Data",
+       color="Response") +
+  scale_color_manual(values=RESPONSE_COLORS)
 ```
 ## Difex
 ```{r}
@@ -202,9 +210,11 @@ deseq_kallisto_lrt
 ```{r}
 fc_mat <- read_tsv("../work/input/GSE126044_counts.txt")
  fc_mat <- fc_mat[!grepl("^\\d+\\-",fc_mat$X1),] %>%
-   column_to_rownames("X1") %>%
+   column_to_rownames("X1")
+ 
+fc_mat_filt <-  fc_mat %>%
    select(one_of(samples_filt$`Patient ID`))
-deseq_fc <- DESeqDataSetFromMatrix(countData=fc_mat,colData=samples_filt,design=~Response)
+deseq_fc <- DESeqDataSetFromMatrix(countData=fc_mat_filt,colData=samples_filt,design=~Response)
 ```
 
 ## QC
@@ -216,7 +226,10 @@ meanSdPlot(assay(deseq_fc_norm),rank=FALSE,bins=100)
 
 ## PCA
 ```{r}
-plotPCA(deseq_fc_norm,intgroup="Response",ntop=500000)
+plotPCA(deseq_fc_norm,intgroup="Response",ntop=500000) +
+  labs(title="PCA Plot of DESeq Normalized Feature Counts/STAR Quantified Data",
+       color="Response") +
+  scale_color_manual(values=RESPONSE_COLORS)
 ```
 
 ## Difex
@@ -233,7 +246,7 @@ deseq_fc_lrt %>%
 
 ## counts_to_rpm, pca
 ```{r}
-tfc <- t(fc_mat)
+tfc <- t(fc_mat_filt)
 # Convert Kallisto counts to rpm
 kalread<-cbind(kallisto_mapped_reads=samples_filt$kallisto_mapped_reads, sleuth_rna_norm %>% rownames_to_column("sample"))
 kalrpm<-setDT(kalread) [, lapply(.SD, function(x) (x * 1e6) / (kallisto_mapped_reads)),  by=.(kallisto_mapped_reads,sample)] %>% 
@@ -241,7 +254,7 @@ kalrpm<-setDT(kalread) [, lapply(.SD, function(x) (x * 1e6) / (kallisto_mapped_r
 
 # Convert star fc to rpm
 #get df with est total reads for star
-staread<-cbind(star_est_mapped=colSums(fc_mat), as.data.frame(tfc) %>% rownames_to_column("sample"))
+staread<-cbind(star_est_mapped=colSums(fc_mat_filt), as.data.frame(tfc) %>% rownames_to_column("sample"))
 starpm<-setDT(staread) [, lapply(.SD, function(x) (x * 1e6) / (star_est_mapped)),  by=.(star_est_mapped,sample)] %>%
   column_to_rownames("sample")
 
@@ -253,9 +266,20 @@ starnorm_std <- scale(starpm[,-1])
 star_rpm_pca <- prcomp(starnorm_std[ , which(apply(starnorm_std, 2, var) != 0)],center=TRUE)
 
 ## superimposed pca plots from the two sources
-p1<-kal_rpm_pca$x[,1:2] %>% as.data.frame()
-p2<-star_rpm_pca$x[,1:2] %>% as.data.frame()
-ggplot()+geom_point(data=p1,aes(x=PC1,y=PC2, color='Kallisto')) + geom_point(data=p2,aes(x=PC1,y=PC2,color='STAR')) + scale_colour_manual(name="Dataset",values=c(Kallisto="blue", STAR="red"))
+p1 <-kal_rpm_pca$x[,1:2]%>%
+  as.data.frame() %>%
+  rownames_to_column("SRR") %>%
+  left_join(samples_filt,by="SRR")
+p2<-star_rpm_pca$x[,1:2] %>%
+  as.data.frame() %>%
+  rownames_to_column("Patient ID") %>%
+  left_join(samples_filt,by="Patient ID")
+bind_rows(Kallisto=p1,STAR=p2,.id="quant_type") %>%
+  ggplot(aes(x=PC1,y=PC2,color=Response,shape=quant_type)) +
+    geom_point() +
+    scale_color_manual(values=RESPONSE_COLORS) + 
+    labs(title="Superimposed PCA of RPM Normalized Counts from STAR/FC and Kallisto",
+         shape="Method")
 ```
 
 
@@ -469,17 +493,19 @@ deseq.fc.down <- deseq_fc_lrt$row[which((deseq_fc_lrt$padj <= 0.05) & (deseq_fc_
 
 # up-regulated venn-diagram
 grid.newpage()
-vd <- venn.diagram(x = list("sleuth.up" = (sleuth.up),
-                            "deseq-Kallisto.up" = (deseq.k.up),
-                            "deseq-FC.up" = (deseq.fc.up)),
+vd <- venn.diagram(x = list("Kallisto-Sleuth" = (sleuth.up),
+                            "Kallisto-DESeq" = (deseq.k.up),
+                            "FeatureCounts-DESeq" = (deseq.fc.up)),
+                    main="Venn Diagram of Downregulated Genes Between 3 Methods",
                    fill = brewer.pal(4, "Set2")[1:3], filename = NULL)
 grid.draw(vd)
 
 # down-regulated venn-diagram
 grid.newpage()
-vd <- venn.diagram(x = list("sleuth.down" = (sleuth.down),
-                            "deseq-Kallisto.down" = (deseq.k.down),
-                            "deseq-FC.down" = (deseq.fc.down)),
+vd <- venn.diagram(x = list("Kallisto-Sleuth" = (sleuth.down),
+                            "Kallist-DESeq" = (deseq.k.down),
+                            "FeatureCounts-DESeq" = (deseq.fc.down)),
+                   main="Venn Diagram of Downregulated Genes Between 3 Methods",
                    fill = brewer.pal(4, "Set2")[1:3], filename = NULL)
 grid.draw(vd)
 
@@ -564,6 +590,15 @@ ht_list = ht1 + ht2
 draw(ht_list, row_km = 1, row_split = updown.regul, cluster_rows = TRUE)
 ```
 
+# Sample overview table
+```{r}
+sample_summary <- data.frame(fc_mapped_reads=colSums(fc_mat)) %>% 
+  rownames_to_column("Patient ID") %>% 
+  left_join(samples,by="Patient ID") %>%
+  select(`Patient ID`,SRR,Response,"Sequenced Reads"=n_reads,"Mapped Reads(Kallisto)"=kallisto_mapped_reads,"Mapped Reads(STAR/FeatureCounts)"=fc_mapped_reads)
+sample_summary
+```
+
 
 # Write out relevant files
 ```{r}
@@ -571,4 +606,5 @@ sleuth_diffex_lrt %>% write_tsv("sleuth_diffex_lrt.tsv")
 sleuth_diffex_wald %>% write_tsv("sleuth_diffex_wald.tsv")
 deseq_kallisto_lrt %>% write_tsv("deseq_kallisto_lrt.tsv")
 deseq_fc_lrt %>% write_tsv("deseq_fc_lrt.tsv")
+sample_summary%>% write_tsv("sample_summary.tsv")
 ```
