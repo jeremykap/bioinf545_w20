@@ -177,6 +177,8 @@ txi <- tximport(
 )
 rownames(samples_filt) <- samples_filt$`Patient ID`
 deseq_kallisto_data <- DESeqDataSetFromTximport(txi,samples_filt,~Response)
+kallisto_keep <- rowSums(counts(deseq_kallisto_data)>5)>5
+deseq_kallisto_data <- deseq_kallisto_data[kallisto_keep,]
 ```
 
 ## QC
@@ -203,7 +205,6 @@ deseq_kallisto_lrt %>%
   arrange(padj) %>%
   select(row,log2FoldChange,pvalue,padj) %>%
   left_join(select(t2g,ensembl_gene_id,external_gene_name),by=c("row"="ensembl_gene_id"))
-deseq_kallisto_lrt
 ```
 
 # DESeq (FeatureCounts)
@@ -215,6 +216,8 @@ fc_mat <- read_tsv("../work/input/GSE126044_counts.txt")
 fc_mat_filt <-  fc_mat %>%
    select(one_of(samples_filt$`Patient ID`))
 deseq_fc <- DESeqDataSetFromMatrix(countData=fc_mat_filt,colData=samples_filt,design=~Response)
+fc_keep <- rowSums(counts(deseq_fc)>5)>5
+deseq_fc <- deseq_fc[fc_keep,]
 ```
 
 ## QC
@@ -237,7 +240,7 @@ plotPCA(deseq_fc_norm,intgroup="Response",ntop=500000) +
 deseq_fc <- DESeq(deseq_fc)
 deseq_fc_lrt <- results(deseq_fc,name="Response_R_vs_NR",tidy=TRUE)
 deseq_fc_lrt %>% 
-  filter(padj < 0.05) %>%
+ # filter(padj < 0.05) %>%
   arrange(padj) %>%
   select(row,log2FoldChange,pvalue,padj)
 ```
@@ -276,9 +279,9 @@ p2<-star_rpm_pca$x[,1:2] %>%
   left_join(samples_filt,by="Patient ID")
 bind_rows(Kallisto=p1,STAR=p2,.id="quant_type") %>%
   ggplot(aes(x=PC1,y=PC2,color=Response,shape=quant_type)) +
-    geom_point() +
+    geom_point(size=3) +
     scale_color_manual(values=RESPONSE_COLORS) + 
-    labs(title="Superimposed PCA of RPM Normalized Counts from STAR/FC and Kallisto",
+    labs(title="Superimposed PCA of RPM Normalized Counts",
          shape="Method")
 ```
 
@@ -310,7 +313,8 @@ log2fc_combined %>%
   theme_pubr(base_size = 14)+
   geom_smooth(method = "lm", color="red") +
   annotate("text", label = equation(regression.line), x = -3, y = 4, parse = TRUE)+
-  labs(title="Comparison of log2FC between Sleuth and DESeq Kallisto")
+  labs(title="Comparison of log2FC between Sleuth and DESeq Kallisto",
+       x="log2 Fold Change (Sleuth-Kallisto)",y="log2 Fold Change (DESeq-Kallisto)")
 
 
 regression.line <- lm(deseq_fc_log2FC ~ deseq_kal_log2FC, data = log2fc_combined)
@@ -322,7 +326,8 @@ log2fc_combined %>%
   theme_pubr(base_size = 14)+
   geom_smooth(method = "lm", color="red") +
   annotate("text", label = equation(regression.line), x = -4, y = 5, parse = TRUE)+
-  labs(title="Comparison of log2FC between DESeq From Kallisto and FC")
+  labs(title="Comparison of log2FC between DESeq From Kallisto and FC",
+       x="log2 Fold Change (DESeq-FeatureCounts)",y="log2 Fold Change (DESeq-Kallisto)")
 
 ```
 
@@ -493,18 +498,18 @@ deseq.fc.down <- deseq_fc_lrt$row[which((deseq_fc_lrt$padj <= 0.05) & (deseq_fc_
 
 # up-regulated venn-diagram
 grid.newpage()
-vd <- venn.diagram(x = list("Kallisto-Sleuth" = (sleuth.up),
-                            "Kallisto-DESeq" = (deseq.k.up),
-                            "FeatureCounts-DESeq" = (deseq.fc.up)),
-                    main="Venn Diagram of Downregulated Genes Between 3 Methods",
+vd <- venn.diagram(x = list("Sleuth-Kallisto" = (sleuth.up),
+                            "DESeq-Kallisto" = (deseq.k.up),
+                            "DESeq-FeatureCounts" = (deseq.fc.up)),
+                    main="Venn Diagram of Upregulated Genes Between 3 Methods",
                    fill = brewer.pal(4, "Set2")[1:3], filename = NULL)
 grid.draw(vd)
 
 # down-regulated venn-diagram
 grid.newpage()
-vd <- venn.diagram(x = list("Kallisto-Sleuth" = (sleuth.down),
-                            "Kallist-DESeq" = (deseq.k.down),
-                            "FeatureCounts-DESeq" = (deseq.fc.down)),
+vd <- venn.diagram(x = list("Sleuth-Kallisto" = (sleuth.down),
+                            "DESeq-Kallisto" = (deseq.k.down),
+                            "DESeq-FeatureCounts" = (deseq.fc.down)),
                    main="Venn Diagram of Downregulated Genes Between 3 Methods",
                    fill = brewer.pal(4, "Set2")[1:3], filename = NULL)
 grid.draw(vd)
